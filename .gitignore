@@ -1,0 +1,42 @@
+# Nextflow runtime
+work/
+.nextflow/
+.nextflow.*
+.nextflow.log*
+.nxf*
+execution-reports/
+
+# Outputs and logs
+results/
+output/
+publish/
+logs/
+*.log
+*.out
+*.err
+
+# Containers and environments
+.singularity-cache/
+*.sif
+*.simg
+*.img
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Local notes and debug material
+.untracked/
+
+# Editor and OS noise
+.DS_Store
+*.DS_Store
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
