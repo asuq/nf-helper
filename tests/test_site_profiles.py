@@ -56,7 +56,7 @@ class SiteProfileContractTestCase(unittest.TestCase):
         self.assertIn("withLabel: gpu", text)
         self.assertIn("--gpus=${params.gpu_type}:${params.gpus ?: 1}", text)
         self.assertIn("params.gpu_container_options ?: '--nv'", text)
-        self.assertIn("ociAutoPull = true", text)
+        self.assertIn("ociAutoPull = false", text)
         self.assertIn("docker {", text)
         self.assertIn("enabled = false", text)
         self.assertNotIn("slurm_cluster_options", text)
