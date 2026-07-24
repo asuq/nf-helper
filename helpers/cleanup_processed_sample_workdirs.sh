@@ -538,6 +538,11 @@ directory_size_kib() {
     du -sk "$1" 2>/dev/null | awk '{ print $1 }'
 }
 
+format_kib_as_mib() {
+    # Convert an integer KiB value to MiB while retaining roughly 1 KiB precision.
+    awk -v size_kib="$1" 'BEGIN { printf "%.3f", size_kib / 1024 }'
+}
+
 cleanup_workdirs() {
     # Delete or report the fenced work directories.
     local safe_workdirs=$1
@@ -545,6 +550,8 @@ cleanup_workdirs() {
     local count=0
     local total_kib=0
     local size_kib
+    local size_mib
+    local total_mib
     local path
 
     cut -f 3 "$safe_workdirs" | sort -u > "$unique_paths"
@@ -556,19 +563,21 @@ cleanup_workdirs() {
         size_kib=${size_kib:-0}
         total_kib=$((total_kib + size_kib))
         count=$((count + 1))
+        size_mib=$(format_kib_as_mib "$size_kib")
 
         if [ "$DRY_RUN" -eq 1 ]; then
-            printf 'DRY-RUN would delete\t%s\t%s KiB\n' "$path" "$size_kib"
+            printf 'DRY-RUN would delete\t%s\t%s MiB\n' "$path" "$size_mib"
         else
-            printf 'Deleting\t%s\t%s KiB\n' "$path" "$size_kib"
+            printf 'Deleting\t%s\t%s MiB\n' "$path" "$size_mib"
             rm -rf -- "$path"
         fi
     done < "$unique_paths"
 
+    total_mib=$(format_kib_as_mib "$total_kib")
     if [ "$DRY_RUN" -eq 1 ]; then
-        log "DRY-RUN summary: processed_samples=$(wc -l < "$PROCESSED_OUT" | awk '{print $1 - 1}') matched_workdirs=$count total_size=${total_kib} KiB"
+        log "DRY-RUN summary: processed_samples=$(wc -l < "$PROCESSED_OUT" | awk '{print $1 - 1}') matched_workdirs=$count total_size=${total_mib} MiB"
     else
-        log "Cleanup summary: processed_samples=$(wc -l < "$PROCESSED_OUT" | awk '{print $1 - 1}') deleted_workdirs=$count total_size=${total_kib} KiB"
+        log "Cleanup summary: processed_samples=$(wc -l < "$PROCESSED_OUT" | awk '{print $1 - 1}') deleted_workdirs=$count total_size=${total_mib} MiB"
     fi
 }
 

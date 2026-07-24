@@ -133,6 +133,8 @@ test_default_deletes_only_complete_samples() {
     assert_file_contains "$log_file" "Skipping workdir outside --work-root"
     assert_file_contains "$log_file" "Skipping missing workdir from trace"
     assert_file_contains "$log_file" "Cleanup summary: processed_samples=3 deleted_workdirs=6"
+    assert_file_contains "$log_file" " MiB"
+    assert_file_not_contains "$log_file" " KiB"
 }
 
 test_dry_run_and_filters() {
@@ -160,6 +162,8 @@ test_dry_run_and_filters() {
     assert_file_not_contains "$processed_file" "SRA4	SRR4"
     assert_file_contains "$log_file" "DRY-RUN would delete"
     assert_file_contains "$log_file" "DRY-RUN summary: processed_samples=1 matched_workdirs=3"
+    assert_file_contains "$log_file" " MiB"
+    assert_file_not_contains "$log_file" " KiB"
 }
 
 test_inferred_work_root_fence() {
