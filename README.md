@@ -13,6 +13,8 @@ local workflow projects.
 Project-specific pipeline scripts, workflow modules, containers, generated
 outputs, caches, and local run artefacts are intentionally out of scope.
 
+Run the dependency-locked test suite with `pixi run test`.
+
 ## MPCDF Viper-CPU
 
 The `viper-cpu` profile runs ordinary processes with Slurm and routes processes
