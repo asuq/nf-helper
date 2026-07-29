@@ -17,6 +17,7 @@ logs/
 
 # Containers and environments
 .singularity-cache/
+.pixi/
 *.sif
 *.simg
 *.img
