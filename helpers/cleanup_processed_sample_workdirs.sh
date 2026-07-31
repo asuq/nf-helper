@@ -16,6 +16,9 @@ TRACE_FILE=""
 WORK_ROOT=""
 WORK_ROOT_CANONICAL=""
 WORK_ROOT_EXPLICIT=0
+TERMINAL_PROCESS=""
+TRACE_SCHEMA=""
+TRACE_SOURCE=""
 
 usage() {
     # Print command-line usage.
@@ -27,12 +30,16 @@ Options:
   --work-root WORK_DIR    Fence deletion to this work directory root
   --sra SRA               Restrict cleanup to one SRA accession
   --srr SRR               Restrict cleanup to one SRR accession
+  --terminal-process NAME  Require a completed terminal process for each sample
   --processed-out FILE    Processed sample TSV to write (default: beside TRACE_TSV)
   -h, --help              Show this help message
 
-The trace file must be tab-separated and include tag, status, and workdir
-headers. Rows with tags shaped SRA:SRR or SRA:SRR:* are grouped by sample.
-Without --work-root, deletion is fenced under the inferred launch work/ root.
+The trace file must be tab-separated and include status plus either tag/workdir
+or name/hash headers. Rows with tags shaped SRA:SRR or SRA:SRR:* are grouped by
+sample. Default name/hash traces require --work-root and are gated on a
+completed APPEND_SUMMARY task unless --terminal-process selects another task.
+Without --work-root, extended-trace deletion is fenced under the inferred
+launch work/ root.
 EOF
 }
 
@@ -124,6 +131,89 @@ is_safe_workdir_child() {
     esac
 }
 
+detect_trace_schema() {
+    # Identify an extended trace or a default Nextflow name/hash trace.
+    awk -F'\t' '
+        NR == 1 {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "tag") tag_col = i
+                if ($i == "status") status_col = i
+                if ($i == "workdir") workdir_col = i
+                if ($i == "name") name_col = i
+                if ($i == "hash") hash_col = i
+            }
+            if (status_col && tag_col && workdir_col) {
+                print "extended"
+                exit 0
+            }
+            if (status_col && name_col && hash_col) {
+                print "default"
+                exit 0
+            }
+            print "ERROR: trace TSV must include status plus either tag/workdir or name/hash headers" > "/dev/stderr"
+            exit 2
+        }
+        END {
+            if (NR == 0) {
+                print "ERROR: trace TSV is empty" > "/dev/stderr"
+                exit 2
+            }
+        }
+    ' "$TRACE_SOURCE"
+}
+
+resolve_trace_hash() {
+    # Resolve one abbreviated Nextflow hash beneath the explicit work root.
+    local trace_hash=$1
+    local hash_dir
+    local hash_prefix
+    local search_dir
+    local matches_file
+    local match_count
+    local resolved
+
+    hash_dir=${trace_hash%%/*}
+    hash_prefix=${trace_hash#*/}
+    if [ "$hash_dir/$hash_prefix" != "$trace_hash" ] || \
+       [ "${#hash_dir}" -ne 2 ] || [ -z "$hash_prefix" ]; then
+        log "Skipping invalid trace hash: $trace_hash"
+        return 1
+    fi
+    case "$hash_dir$hash_prefix" in
+        *[!0-9A-Fa-f]*)
+            log "Skipping invalid trace hash: $trace_hash"
+            return 1
+            ;;
+    esac
+
+    search_dir="$WORK_ROOT_CANONICAL/$hash_dir"
+    if [ ! -d "$search_dir" ]; then
+        log "Skipping missing workdir for trace hash: $trace_hash"
+        return 1
+    fi
+
+    matches_file="$TMP_DIR/hash_matches.txt"
+    find "$search_dir" \
+        -mindepth 1 \
+        -maxdepth 1 \
+        -type d \
+        -name "${hash_prefix}*" \
+        -print > "$matches_file"
+    match_count=$(wc -l < "$matches_file" | awk '{ print $1 }')
+
+    if [ "$match_count" -eq 0 ]; then
+        log "Skipping missing workdir for trace hash: $trace_hash"
+        return 1
+    fi
+    if [ "$match_count" -ne 1 ]; then
+        log "ERROR: trace hash is ambiguous under --work-root: $trace_hash matched $match_count directories"
+        return 2
+    fi
+
+    IFS= read -r resolved < "$matches_file"
+    canonical_existing_path "$resolved"
+}
+
 parse_trace() {
     # Parse trace rows into latest task statuses and all observed workdirs.
     local final_rows=$1
@@ -142,7 +232,15 @@ parse_trace() {
         function numeric(value) {
             return (value ~ /^[0-9]+$/) ? value + 0 : 0
         }
+        function process_basename(value, parts, part_count) {
+            part_count = split(value, parts, ":")
+            return parts[part_count]
+        }
+        function complete(value) {
+            return value == "COMPLETED" || value == "CACHED"
+        }
         NR == 1 {
+            header_columns = NF
             for (i = 1; i <= NF; i++) {
                 if ($i == "tag") tag_col = i
                 if ($i == "status") status_col = i
@@ -153,14 +251,23 @@ parse_trace() {
                 if ($i == "hash") hash_col = i
                 if ($i == "process") process_col = i
             }
-            if (!tag_col || !status_col || !workdir_col) {
-                print "ERROR: trace TSV must include tag, status, and workdir headers" > "/dev/stderr"
-                exit 2
-            }
             next
         }
         {
-            tag = $tag_col
+            if (NF != header_columns) {
+                print "Skipping incomplete trace row " NR > "/dev/stderr"
+                next
+            }
+
+            if (tag_col) {
+                tag = $tag_col
+            }
+            else {
+                tag = $name_col
+                if (tag !~ / \([^()]*\)$/) next
+                sub(/^.* \(/, "", tag)
+                sub(/\)$/, "", tag)
+            }
             if (tag == "") next
 
             part_count = split(tag, parts, ":")
@@ -173,22 +280,39 @@ parse_trace() {
             if (filter_srr != "" && srr != filter_srr) next
 
             sample = sra "\t" srr
-            samples_seen++
+            if (!(sample in sample_seen)) {
+                sample_seen[sample] = 1
+                samples[++sample_count] = sample
+            }
 
-            workdir = $workdir_col
-            if (workdir != "") {
-                print sample "\t" workdir >> all_workdirs
+            if (workdir_col) {
+                locator_type = "workdir"
+                locator = $workdir_col
+            }
+            else {
+                locator_type = "hash"
+                locator = $hash_col
+            }
+            if (locator != "") {
+                locator_sample[++locator_count] = sample
+                locator_kind[locator_count] = locator_type
+                locator_value[locator_count] = locator
             }
 
             status = upper($status_col)
+            process = process_col ? $process_col : ""
+            if (process == "" && name_col && $name_col != "") {
+                process = $name_col
+                sub(/ \([^()]*\)$/, "", process)
+            }
             if (name_col && $name_col != "") {
                 task_key = $name_col
             }
             else if (hash_col && $hash_col != "") {
-                task_key = (process_col ? $process_col : "") "|" tag "|" $hash_col
+                task_key = process "|" tag "|" $hash_col
             }
             else if (attempt_col || task_id_col) {
-                task_key = (process_col ? $process_col : "") "|" tag "|" workdir
+                task_key = process "|" tag "|" locator
             }
             else {
                 task_key = sample "|" NR
@@ -206,6 +330,9 @@ parse_trace() {
                 key_sample[key] = sample
                 seen[key] = 1
             }
+            if (terminal_process != "" && process_basename(process) == terminal_process) {
+                key_terminal[key] = 1
+            }
             if (!(key in best_score) || score >= best_score[key]) {
                 best_score[key] = score
                 best_status[key] = status
@@ -218,10 +345,31 @@ parse_trace() {
             }
             for (i = 1; i <= key_count; i++) {
                 key = keys[i]
-                print key_sample[key] "\t" best_status[key] > final_rows
+                if (key_terminal[key] && complete(best_status[key])) {
+                    terminal_complete[key_sample[key]] = 1
+                }
+            }
+            for (i = 1; i <= sample_count; i++) {
+                sample = samples[i]
+                if (terminal_process != "" && !terminal_complete[sample]) {
+                    print "Skipping sample " sample ": no completed terminal process " terminal_process > "/dev/stderr"
+                }
+            }
+            for (i = 1; i <= locator_count; i++) {
+                sample = locator_sample[i]
+                if (terminal_process == "" || terminal_complete[sample]) {
+                    print sample "\t" locator_kind[i] "\t" locator_value[i] >> all_workdirs
+                }
+            }
+            for (i = 1; i <= key_count; i++) {
+                key = keys[i]
+                sample = key_sample[key]
+                if (terminal_process == "" || terminal_complete[sample]) {
+                    print sample "\t" best_status[key] > final_rows
+                }
             }
         }
-    ' "$TRACE_FILE"
+    ' terminal_process="$TERMINAL_PROCESS" "$TRACE_SOURCE"
 }
 
 write_eligible_samples() {
@@ -280,7 +428,7 @@ filter_eligible_workdirs() {
         }
         {
             sample = $1 FS $2
-            if (sample in eligible && $3 != "") {
+            if (sample in eligible && $3 != "" && $4 != "") {
                 print
             }
         }
@@ -293,22 +441,42 @@ collect_safe_workdirs() {
     local safe_workdirs=$2
     local sra
     local srr
+    local locator_type
     local path
     local candidate
     local resolved
+    local resolve_status
 
     : > "$safe_workdirs"
 
-    while IFS=$'\t' read -r sra srr path; do
+    while IFS=$'\t' read -r sra srr locator_type path; do
         [ -n "${sra:-}" ] || continue
         [ -n "${srr:-}" ] || continue
         [ -n "${path:-}" ] || continue
 
-        candidate=$(normalise_trace_workdir "$path")
-        if ! resolved=$(canonical_existing_path "$candidate"); then
-            log "Skipping missing workdir from trace: $candidate"
-            continue
-        fi
+        case "$locator_type" in
+            workdir)
+                candidate=$(normalise_trace_workdir "$path")
+                if ! resolved=$(canonical_existing_path "$candidate"); then
+                    log "Skipping missing workdir from trace: $candidate"
+                    continue
+                fi
+                ;;
+            hash)
+                if resolved=$(resolve_trace_hash "$path"); then
+                    :
+                else
+                    resolve_status=$?
+                    if [ "$resolve_status" -eq 2 ]; then
+                        exit 2
+                    fi
+                    continue
+                fi
+                ;;
+            *)
+                fail "internal error: unsupported trace locator type: $locator_type"
+                ;;
+        esac
 
         if is_safe_workdir_child "$resolved"; then
             printf '%s\t%s\t%s\n' "$sra" "$srr" "$resolved" >> "$safe_workdirs"
@@ -370,6 +538,11 @@ directory_size_kib() {
     du -sk "$1" 2>/dev/null | awk '{ print $1 }'
 }
 
+format_kib_as_mib() {
+    # Convert an integer KiB value to MiB while retaining roughly 1 KiB precision.
+    awk -v size_kib="$1" 'BEGIN { printf "%.3f", size_kib / 1024 }'
+}
+
 cleanup_workdirs() {
     # Delete or report the fenced work directories.
     local safe_workdirs=$1
@@ -377,6 +550,8 @@ cleanup_workdirs() {
     local count=0
     local total_kib=0
     local size_kib
+    local size_mib
+    local total_mib
     local path
 
     cut -f 3 "$safe_workdirs" | sort -u > "$unique_paths"
@@ -388,19 +563,21 @@ cleanup_workdirs() {
         size_kib=${size_kib:-0}
         total_kib=$((total_kib + size_kib))
         count=$((count + 1))
+        size_mib=$(format_kib_as_mib "$size_kib")
 
         if [ "$DRY_RUN" -eq 1 ]; then
-            printf 'DRY-RUN would delete\t%s\t%s KiB\n' "$path" "$size_kib"
+            printf 'DRY-RUN would delete\t%s\t%s MiB\n' "$path" "$size_mib"
         else
-            printf 'Deleting\t%s\t%s KiB\n' "$path" "$size_kib"
+            printf 'Deleting\t%s\t%s MiB\n' "$path" "$size_mib"
             rm -rf -- "$path"
         fi
     done < "$unique_paths"
 
+    total_mib=$(format_kib_as_mib "$total_kib")
     if [ "$DRY_RUN" -eq 1 ]; then
-        log "DRY-RUN summary: processed_samples=$(wc -l < "$PROCESSED_OUT" | awk '{print $1 - 1}') matched_workdirs=$count total_size=${total_kib} KiB"
+        log "DRY-RUN summary: processed_samples=$(wc -l < "$PROCESSED_OUT" | awk '{print $1 - 1}') matched_workdirs=$count total_size=${total_mib} MiB"
     else
-        log "Cleanup summary: processed_samples=$(wc -l < "$PROCESSED_OUT" | awk '{print $1 - 1}') deleted_workdirs=$count total_size=${total_kib} KiB"
+        log "Cleanup summary: processed_samples=$(wc -l < "$PROCESSED_OUT" | awk '{print $1 - 1}') deleted_workdirs=$count total_size=${total_mib} MiB"
     fi
 }
 
@@ -437,6 +614,15 @@ while [ "$#" -gt 0 ]; do
             FILTER_SRR=${1#*=}
             shift
             ;;
+        --terminal-process)
+            [ "$#" -ge 2 ] || fail "--terminal-process requires a value"
+            TERMINAL_PROCESS=$2
+            shift 2
+            ;;
+        --terminal-process=*)
+            TERMINAL_PROCESS=${1#*=}
+            shift
+            ;;
         --processed-out)
             [ "$#" -ge 2 ] || fail "--processed-out requires a value"
             PROCESSED_OUT=$2
@@ -471,11 +657,13 @@ require_command basename
 require_command cut
 require_command dirname
 require_command du
+require_command find
 require_command mktemp
 require_command mv
 require_command rm
 require_command sort
 require_command wc
+require_command cp
 
 TRACE_FILE=$(canonical_existing_path "$TRACE_FILE")
 TRACE_DIR=$(dirname "$TRACE_FILE")
@@ -496,6 +684,20 @@ fi
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cleanup_processed_sample_workdirs.XXXXXX")
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+TRACE_SOURCE="$TMP_DIR/trace.tsv"
+cp -- "$TRACE_FILE" "$TRACE_SOURCE"
+if ! TRACE_SCHEMA=$(detect_trace_schema); then
+    exit 1
+fi
+if [ "$TRACE_SCHEMA" = "default" ]; then
+    [ "$WORK_ROOT_EXPLICIT" -eq 1 ] || \
+        fail "default name/hash traces require an explicit --work-root"
+    if [ -z "$TERMINAL_PROCESS" ]; then
+        TERMINAL_PROCESS="APPEND_SUMMARY"
+    fi
+    log "Using default trace compatibility mode with terminal process: $TERMINAL_PROCESS"
+fi
 
 FINAL_ROWS="$TMP_DIR/final_rows.tsv"
 ALL_WORKDIRS="$TMP_DIR/all_workdirs.tsv"

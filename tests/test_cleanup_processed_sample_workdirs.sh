@@ -133,6 +133,8 @@ test_default_deletes_only_complete_samples() {
     assert_file_contains "$log_file" "Skipping workdir outside --work-root"
     assert_file_contains "$log_file" "Skipping missing workdir from trace"
     assert_file_contains "$log_file" "Cleanup summary: processed_samples=3 deleted_workdirs=6"
+    assert_file_contains "$log_file" " MiB"
+    assert_file_not_contains "$log_file" " KiB"
 }
 
 test_dry_run_and_filters() {
@@ -160,6 +162,8 @@ test_dry_run_and_filters() {
     assert_file_not_contains "$processed_file" "SRA4	SRR4"
     assert_file_contains "$log_file" "DRY-RUN would delete"
     assert_file_contains "$log_file" "DRY-RUN summary: processed_samples=1 matched_workdirs=3"
+    assert_file_contains "$log_file" " MiB"
+    assert_file_not_contains "$log_file" " KiB"
 }
 
 test_inferred_work_root_fence() {
@@ -190,6 +194,115 @@ EOF
     assert_file_contains "$log_file" "Cleanup summary: processed_samples=1 deleted_workdirs=1"
 }
 
+test_default_trace_live_cleanup() {
+    # Verify default name/hash traces only clean terminal noassembly samples.
+    local run_dir="$TMP_ROOT/default_trace"
+    local trace_file="$run_dir/execution-reports/trace.tsv"
+    local processed_file="$run_dir/execution-reports/processed_sample_workdirs.tsv"
+    local log_file="$TMP_ROOT/default_trace.log"
+    local cleanup_log_file="$TMP_ROOT/default_trace_cleanup.log"
+    local trace_file_canonical
+
+    mkdir -p \
+        "$run_dir/execution-reports" \
+        "$run_dir/work/10/aaaaaa111111" \
+        "$run_dir/work/11/bbbbbb222222" \
+        "$run_dir/work/12/cccccc333333" \
+        "$run_dir/work/20/dddddd444444" \
+        "$run_dir/work/21/eeeeee555555" \
+        "$run_dir/work/30/ffffff666666"
+    for dir in "$run_dir"/work/*/*; do
+        printf 'x\n' > "$dir/file.txt"
+    done
+
+    cat > "$trace_file" <<EOF
+task_id	hash	native_id	name	status	exit	submit	duration	realtime	%cpu	peak_rss	peak_vmem	rchar	wchar
+1	10/aaaaaa	101	PRE_SCREENING:DOWNLOAD_SRR (SRA1:SRR1)	COMPLETED	0	date	1s	1s	1%	1 MB	1 MB	1 B	1 B
+2	11/bbbbbb	102	PRE_SCREENING:SINGLEM (SRA1:SRR1)	CACHED	0	date	1s	1s	1%	1 MB	1 MB	1 B	1 B
+3	12/cccccc	103	SUMMARY:APPEND_SUMMARY (SRA1:SRR1:short:)	COMPLETED	0	date	1s	1s	1%	1 MB	1 MB	1 B	1 B
+4	20/dddddd	104	PRE_SCREENING:DOWNLOAD_SRR (SRA2:SRR2)	COMPLETED	0	date	1s	1s	1%	1 MB	1 MB	1 B	1 B
+5	21/eeeeee	105	PRE_SCREENING:SINGLEM (SRA2:SRR2)	COMPLETED	0	date	1s	1s	1%	1 MB	1 MB	1 B	1 B
+6	30/ffffff	106	SUMMARY:APPEND_SUMMARY (SRA3:SRR3:short:)	RUNNING	-	date	1s	1s	1%	1 MB	1 MB	1 B	1 B
+7	31/111111	107	SUMMARY:APPEND_SUMMARY (SRA4:SRR4:short:)
+EOF
+    trace_file_canonical=$(canonical_existing_path "$trace_file")
+
+    "$HELPER" "$trace_file" \
+        --work-root "$run_dir/work" \
+        --dry-run > "$log_file" 2>&1
+
+    assert_dir_exists "$run_dir/work/10/aaaaaa111111"
+    assert_dir_exists "$run_dir/work/11/bbbbbb222222"
+    assert_dir_exists "$run_dir/work/12/cccccc333333"
+    assert_dir_exists "$run_dir/work/20/dddddd444444"
+    assert_dir_exists "$run_dir/work/21/eeeeee555555"
+    assert_dir_exists "$run_dir/work/30/ffffff666666"
+    assert_file_contains "$processed_file" "SRA1	SRR1	3	false	true	$trace_file_canonical"
+    assert_file_not_contains "$processed_file" "SRA2	SRR2"
+    assert_file_not_contains "$processed_file" "SRA3	SRR3"
+    assert_file_contains "$log_file" "Using default trace compatibility mode with terminal process: APPEND_SUMMARY"
+    assert_file_contains "$log_file" "Skipping sample SRA2	SRR2: no completed terminal process APPEND_SUMMARY"
+    assert_file_contains "$log_file" "Skipping sample SRA3	SRR3: no completed terminal process APPEND_SUMMARY"
+    assert_file_contains "$log_file" "Skipping incomplete trace row 8"
+    assert_file_contains "$log_file" "DRY-RUN summary: processed_samples=1 matched_workdirs=3"
+
+    "$HELPER" "$trace_file" \
+        --work-root "$run_dir/work" > "$cleanup_log_file" 2>&1
+
+    assert_dir_missing "$run_dir/work/10/aaaaaa111111"
+    assert_dir_missing "$run_dir/work/11/bbbbbb222222"
+    assert_dir_missing "$run_dir/work/12/cccccc333333"
+    assert_dir_exists "$run_dir/work/20/dddddd444444"
+    assert_dir_exists "$run_dir/work/21/eeeeee555555"
+    assert_dir_exists "$run_dir/work/30/ffffff666666"
+    assert_file_contains "$processed_file" "SRA1	SRR1	3	true	false	$trace_file_canonical"
+    assert_file_contains "$cleanup_log_file" "Cleanup summary: processed_samples=1 deleted_workdirs=3"
+}
+
+test_default_trace_requires_explicit_work_root() {
+    # Verify abbreviated hashes are never resolved against an inferred root.
+    local run_dir="$TMP_ROOT/default_trace_no_root"
+    local trace_file="$run_dir/execution-reports/trace.tsv"
+    local log_file="$TMP_ROOT/default_trace_no_root.log"
+
+    mkdir -p "$run_dir/execution-reports"
+    cat > "$trace_file" <<EOF
+task_id	hash	name	status
+1	10/aaaaaa	SUMMARY:APPEND_SUMMARY (SRA1:SRR1:short:)	COMPLETED
+EOF
+
+    if "$HELPER" "$trace_file" --dry-run > "$log_file" 2>&1; then
+        fail "default trace without --work-root unexpectedly succeeded"
+    fi
+
+    assert_file_contains "$log_file" "default name/hash traces require an explicit --work-root"
+}
+
+test_ambiguous_default_trace_hash_fails() {
+    # Verify abbreviated hash collisions abort before any deletion.
+    local run_dir="$TMP_ROOT/ambiguous_hash"
+    local trace_file="$run_dir/execution-reports/trace.tsv"
+    local log_file="$TMP_ROOT/ambiguous_hash.log"
+
+    mkdir -p \
+        "$run_dir/execution-reports" \
+        "$run_dir/work/10/aaaaaa111111" \
+        "$run_dir/work/10/aaaaaa222222"
+    cat > "$trace_file" <<EOF
+task_id	hash	name	status
+1	10/aaaaaa	SUMMARY:APPEND_SUMMARY (SRA1:SRR1:short:)	COMPLETED
+EOF
+
+    if "$HELPER" "$trace_file" \
+        --work-root "$run_dir/work" > "$log_file" 2>&1; then
+        fail "ambiguous trace hash unexpectedly succeeded"
+    fi
+
+    assert_dir_exists "$run_dir/work/10/aaaaaa111111"
+    assert_dir_exists "$run_dir/work/10/aaaaaa222222"
+    assert_file_contains "$log_file" "trace hash is ambiguous under --work-root"
+}
+
 test_missing_trace_header_fails() {
     # Verify malformed trace files fail clearly.
     local run_dir="$TMP_ROOT/bad_trace"
@@ -206,7 +319,7 @@ EOF
         fail "malformed trace command unexpectedly succeeded"
     fi
 
-    assert_file_contains "$log_file" "trace TSV must include tag, status, and workdir headers"
+    assert_file_contains "$log_file" "trace TSV must include status plus either tag/workdir or name/hash headers"
 }
 
 main() {
@@ -217,6 +330,9 @@ main() {
     test_default_deletes_only_complete_samples
     test_dry_run_and_filters
     test_inferred_work_root_fence
+    test_default_trace_live_cleanup
+    test_default_trace_requires_explicit_work_root
+    test_ambiguous_default_trace_hash_fails
     test_missing_trace_header_fails
 
     printf 'cleanup_processed_sample_workdirs tests passed\n'
