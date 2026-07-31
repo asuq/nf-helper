@@ -22,7 +22,9 @@ labelled `needs_internet` to the login node. It is intentionally restricted to
 launches from `viper05i`; its runtime short hostname may be reported as
 `viper05`. The local executor admits at most two one-CPU tasks.
 Slurm queue size is unlimited from Nextflow's perspective, leaving Viper's
-scheduler limits authoritative.
+scheduler limits authoritative. Nextflow refreshes the batched Slurm status
+query every 30 seconds and waits at most one minute for the task exit file after
+a job leaves the queue, so killed and out-of-memory jobs are reported promptly.
 
 Before launching, load the pinned Apptainer module and choose shared `/ptmp`
 locations for both the container cache and Nextflow work directory:
