@@ -19,7 +19,8 @@ Run the dependency-locked test suite with `pixi run test`.
 
 The `viper-cpu` profile runs ordinary processes with Slurm and routes processes
 labelled `needs_internet` to the login node. It is intentionally restricted to
-launches from `viper05i`; the local executor admits at most two one-CPU tasks.
+launches from `viper05i`; its runtime short hostname may be reported as
+`viper05`. The local executor admits at most two one-CPU tasks.
 Slurm queue size is unlimited from Nextflow's perspective, leaving Viper's
 scheduler limits authoritative.
 
