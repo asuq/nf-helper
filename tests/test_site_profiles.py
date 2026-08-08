@@ -30,11 +30,13 @@ class SiteProfileContractTestCase(unittest.TestCase):
         self.assertIn('params.slurm_qos ? "--qos=${params.slurm_qos}" : null', text)
         self.assertIn("params.slurm_cluster_options ?: null", text)
         self.assertIn("singularity {", text)
-        self.assertIn("enabled = true", text)
+        self.assertIn("singularity {\n            enabled = false", text)
         self.assertIn("apptainer {", text)
+        self.assertIn("enabled = true", text)
         self.assertIn("cacheDir = params.apptainer_cache_dir", text)
         self.assertIn("docker {", text)
         self.assertIn("enabled = false", text)
+        self.assertNotIn("module load", text)
         self.assertNotIn("withName:", text)
 
     def test_gwdg_profile_keeps_rich_site_behaviour(self) -> None:
