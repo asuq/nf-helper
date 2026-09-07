@@ -45,3 +45,32 @@ partition. `/ptmp` is not backed up, and inactive files are subject to the
 MPCDF retention policy. Global scratch staging is disabled. Processes that
 explicitly opt into `process_local_scratch` use Slurm's job-specific
 `$JOB_TMPDIR` and copy declared outputs back to the shared work directory.
+
+## MPCDF Raven
+
+The `raven` profile follows the same storage, internet, and Slurm-controller
+policy as `viper-cpu`, while also supporting Raven's NVIDIA A100 nodes. Ordinary
+CPU tasks are capped at 72 physical cores; pipelines may explicitly opt a
+process into Raven hyperthreading up to `params.raven_max_cpus_ht` (144 logical
+CPUs). Processes labelled `gpu` request one A100 by default, expose 18 CPU cores,
+and run with Apptainer `--nv`. Valid `--gpus` values are 1, 2, and 4. Use
+`--raven_gpu_constraint gpu-bw` or `no-gpu-bw` only when the interconnect class
+matters.
+
+Launch from an explicit `raven01i` through `raven04i` host, not a legacy DNS
+alias. Internet-labelled work runs in the bounded two-task local executor because
+Raven batch jobs cannot access the internet:
+
+```bash
+module load apptainer/1.4.3
+export NXF_APPTAINER_CACHEDIR=/ptmp/<project-or-user>/apptainer-cache
+
+nextflow run <pipeline> \
+  -profile raven \
+  -w /ptmp/<project-or-user>/work
+```
+
+The profile requires the Apptainer cache and work data to live on shared
+`/ptmp`. It leaves partition selection to Raven's Slurm job-submit filter and
+keeps at most 250 Slurm tasks outstanding, below Raven's default 300-job submit
+limit.
